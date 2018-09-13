@@ -1,0 +1,226 @@
+'use strict';
+
+const aws = require('aws-sdk');
+var zlib = require('zlib');
+const cloudWatchLogs = new aws.CloudWatchLogs({
+    apiVersion: '2014-03-28'
+});
+const readline = require('readline');
+const stream = require('stream');
+
+//specifying the log group and the log stream name for CloudWatch Logs
+const logGroupName = 'guardduty-logs'; //Name of the log group goes here;
+const logStreamName = 'guardduty-stream'; //Name of the log stream goes here;
+
+exports.handler = (event, context, callback) => {
+
+    // Get the object from the event and show its content type
+    console.log('Received event:', JSON.stringify(event, null, 2));
+
+    var logData = JSON.stringify(event);
+    //manage the log group, streams and push log events to CloudWatch Logs
+    manageLogGroups(logData);
+    callback(null, event.ContentType);
+
+    //Manage the log group
+    function manageLogGroups (logData) {
+
+        var describeLogGroupParams = {
+            logGroupNamePrefix: logGroupName
+        };
+
+        //check if the log group already exists
+        cloudWatchLogs.describeLogGroups(describeLogGroupParams, function (err, event){
+            if (err) {
+                console.log('Error while describing log group:', err);
+                createLogGroup (logData);
+            } else {
+                if (!event.logGroups[0]) {
+                    console.log ('Need to  create log group:', event);
+                    //create log group
+                    createLogGroup(logData);
+                } else {
+                    console.log('not creating log group');
+                    console.log('Success while describing log group:', event);
+                    manageLogStreams(logData);
+                }
+            }
+        });
+    }
+
+    //Create log group
+    function createLogGroup (logData) {
+        var logGroupParams = {
+            logGroupName: logGroupName
+        };
+        cloudWatchLogs.createLogGroup(logGroupParams, function (err, event){
+            if (err) {
+                console.log('error while creating log group: ', err, err.stack);
+                return;
+            } else {
+                console.log ('Success in creating log group: ', logGroupName);
+                manageLogStreams(logData);
+            }
+        });
+    }
+
+    //Manage the log stream and get the sequenceToken
+    function manageLogStreams (logData) {
+        var describeLogStreamsParams = {
+            logGroupName: logGroupName,
+            logStreamNamePrefix: logStreamName
+        };
+
+        //check if the log stream already exists and get the sequenceToken
+        cloudWatchLogs.describeLogStreams (describeLogStreamsParams, function (err, event) {
+            if (err) {
+                console.log ('Error during describe log streams:', err);
+                //create log stream
+                createLogStream(logData);
+            } else {
+                if (!event.logStreams[0]) {
+                    console.log ('Need to  create log stream:', event);
+                    //create log stream
+                    createLogStream(logData);
+                } else {
+                    console.log ('Log Stream already defined:', logStreamName);
+                    putLogEvents (event.logStreams[0].uploadSequenceToken, logData);
+                }
+            }
+        });
+    }
+
+    //Create Log Stream
+    function createLogStream (logData) {
+        var logStreamParams = {
+            logGroupName: logGroupName,
+            logStreamName: logStreamName
+        };
+
+        cloudWatchLogs.createLogStream(logStreamParams, function (err, event){
+            if (err) {
+                console.log('error while creating log stream: ', err, err.stack);
+                    return;
+            } else {
+                console.log ('Success in creating log stream: ', logStreamName);
+                putLogEvents (null, logData);
+            }
+        });
+    }
+
+    function putLogEvents (sequenceToken, logData) {
+        //From http://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html
+        const MAX_BATCH_SIZE = 1048576; // maximum size in bytes of Log Events (with overhead) per invocation of PutLogEvents
+        const MAX_BATCH_COUNT = 10000; // maximum number of Log Events per invocation of PutLogEvents
+        const LOG_EVENT_OVERHEAD = 26; // bytes of overhead per Log Event
+
+        // holds a list of batches
+        var batches = [];
+
+        // holds the list of events in current batch
+        var batch = [];
+
+        // size of events in the current batch
+        var batch_size = 0;
+
+        var bufferStream = new stream.PassThrough();
+        bufferStream.end(logData);
+
+        var rl = readline.createInterface({
+            input: bufferStream
+        });
+
+        var line_count = 0;
+
+        rl.on('line', (line) => {
+            ++line_count;
+
+            //var ts = line.split(' :', 1)[0];
+            //console.log('ts = ',ts);
+            var tval = Date.now();
+            //var tval = Date.parse(ts);
+
+            var event_size = line.length + LOG_EVENT_OVERHEAD;
+
+            batch_size += event_size;
+
+            if(batch_size >= MAX_BATCH_SIZE ||
+                batch.length >= MAX_BATCH_COUNT) {
+                // start a new batch
+                batches.push(batch);
+                batch = [];
+                batch_size = event_size;
+            }
+
+            batch.push({
+                message: line,
+                timestamp: tval
+            });
+        });
+
+        rl.on('close', () => {
+            // add the final batch
+            batches.push(batch);
+            sendBatches(sequenceToken, batches);
+        });
+    }
+
+    function sendBatches(sequenceToken, batches) {
+        var count = 0;
+        var batch_count = 0;
+
+        function sendNextBatch(err, nextSequenceToken) {
+            if(err) {
+                console.log('Error sending batch: ', err, err.stack);
+                return;
+            } else {
+                var nextBatch = batches.shift();
+                if(nextBatch) {
+                    // send this batch
+                    ++batch_count;
+                    count += nextBatch.length;
+                    sendBatch(nextSequenceToken, nextBatch, sendNextBatch);
+                } else {
+                    // no more batches: we are done
+                    var msg = `Successfully put ${count} events in ${batch_count} batches`;
+                    console.log(msg);
+                    callback(null, msg);
+                }
+            }
+        }
+
+        sendNextBatch(null, sequenceToken);
+    }
+
+    function sendBatch(sequenceToken, batch, doNext) {
+        var putLogEventParams = {
+            logEvents: batch,
+            logGroupName: logGroupName,
+            logStreamName: logStreamName
+        };
+        if (sequenceToken) {
+            putLogEventParams['sequenceToken'] = sequenceToken;
+        }
+
+        // sort the events in ascending order by timestamp as required by PutLogEvents
+        putLogEventParams.logEvents.sort(function(a, b) {
+            if(a.timestamp > b.timestamp) {
+                return 1;
+            }
+            if(a.timestamp < b.timestamp) {
+                return -1;
+            }
+            return 0;
+        });
+
+        cloudWatchLogs.putLogEvents (putLogEventParams, function (err, event) {
+            if (err) {
+                console.log('Error during put log events: ', err, err.stack);
+                doNext(err, null);
+            } else {
+                console.log(`Success in putting ${putLogEventParams.logEvents.length} events`);
+                doNext(null, event.nextSequenceToken);
+            }
+        });
+    }
+};

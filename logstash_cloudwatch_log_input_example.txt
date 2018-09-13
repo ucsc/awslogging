@@ -1,0 +1,44 @@
+############################################
+## Example of cloudwatch_log input plugin
+## values for access and secret keys removed
+## generic log_group names added
+############################################
+cloudwatch_logs {
+    log_group => "default-logs"
+    access_key_id => ""
+    secret_access_key => ""
+    region => "us-west-2"
+    codec => json
+    tags => ["cloudtrail"]
+}
+cloudwatch_logs {
+    log_group => "security-logs"
+    access_key_id => ""
+    secret_access_key => ""
+    region => "us-west-2"
+    codec => json
+    tags => ["security"]
+}
+cloudwatch_logs {
+    log_group => "authentication-logs"
+    access_key_id => ""
+    secret_access_key => ""
+    region => "us-west-2"
+codec => json
+    tags => ["authentication"]
+}
+
+cloudwatch_logs {
+    log_group => "department-flowLogsGroup"
+    access_key_id => ""
+    secret_access_key => ""
+    region => "us-west-2"
+    tags => ["flow"]
+}
+cloudwatch_logs {
+    log_group => "access-logs"
+    access_key_id => ""
+    secret_access_key => ""
+    region => "us-west-2"
+    tags => ["accesslogs"]
+}

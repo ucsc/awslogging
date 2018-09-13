@@ -1,0 +1,36 @@
+############################################
+## Example of AWS related log filters
+## values for access and secret keys removed
+############################################
+
+## Fixing double slash issue in some messages
+if "cloudtrail" in [tags] {
+  mutate {
+     gsub => ["message", "[\\]", ""]
+  }
+
+  ## Creating a new field for reporting purposes
+  if [eventName] == "CreateSecurityGroup" {
+     # Map responseElements.groupId to requestParameters.groupId.. for reporting purposes
+     mutate {
+        add_field => { "[requestParameters][groupId]" => "%{[responseElements][groupId]}" }
+     }
+  }
+
+  ## Map AWS Account ID to Account Name using a predefined lookup yaml file
+  translate {
+     field => "recipientAccountId"
+     destination => "recipientAccountName"
+     dictionary_path => "/etc/logstash/aws-account-ids-to-names.yaml"
+  }
+
+  ## Putting the AWS source IP field into our standard source IP field
+  if [sourceIPAddress] {
+     mutate {
+        add_field => {"srcip" => "%{sourceIPAddress}"}
+     }
+     geoip {
+        source => "srcip"
+     }
+  }
+}
